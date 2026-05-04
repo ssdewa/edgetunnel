@@ -14,13 +14,27 @@ jobs:
       - name: Install wrangler
         run: npm install -g wrangler
 
-      - name: Bind KV to Worker
+      - name: Download Worker Script and Deploy with KV Binding
         run: |
           echo "========================================="
-          echo "使用 wrangler 绑定 KV 命名空间"
+          echo "步骤1：下载当前 Worker 脚本"
           echo "========================================="
           
-          # 创建 wrangler.toml 配置文件（临时）
+          # 用 API 下载当前 Worker 脚本
+          curl -s -X GET \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}/environments/production/content" \
+            -H "X-Auth-Email: ${{ secrets.CF_EMAIL }}" \
+            -H "X-Auth-Key: ${{ secrets.CF_API_KEY }}" \
+            -o _worker.js
+          
+          SCRIPT_SIZE=$(wc -c < _worker.js)
+          echo "下载完成，脚本大小：${SCRIPT_SIZE} 字节"
+          
+          echo ""
+          echo "========================================="
+          echo "步骤2：创建 wrangler.toml 配置文件"
+          echo "========================================="
+          
           cat > wrangler.toml << EOF
           name = "${{ secrets.WORKER_NAME }}"
           main = "_worker.js"
@@ -31,13 +45,14 @@ jobs:
           id = "${{ secrets.KV_NAMESPACE_ID }}"
           EOF
           
-          echo "生成的 wrangler.toml 内容："
+          echo "wrangler.toml 内容："
           cat wrangler.toml
           
           echo ""
-          echo "正在部署（含 KV 绑定）..."
+          echo "========================================="
+          echo "步骤3：部署 Worker（含 KV 绑定）"
+          echo "========================================="
           
-          # 用 API Key 方式认证并部署
           CLOUDFLARE_API_KEY="${{ secrets.CF_API_KEY }}" \
           CLOUDFLARE_EMAIL="${{ secrets.CF_EMAIL }}" \
           npx wrangler deploy \
@@ -46,7 +61,7 @@ jobs:
           
           if [ $? -eq 0 ]; then
             echo ""
-            echo "✅✅✅ 部署成功，KV 绑定已生效！"
+            echo "✅✅✅ 部署成功！KV 绑定已生效！"
           else
             echo ""
             echo "❌❌❌ 部署失败"
@@ -57,7 +72,7 @@ jobs:
         run: |
           echo ""
           echo "========================================="
-          echo "验证绑定结果"
+          echo "步骤4：验证 KV 绑定"
           echo "========================================="
           
           VERIFY_RESPONSE=$(curl -s -X GET \
