@@ -14,30 +14,56 @@ jobs:
       - name: Install wrangler
         run: npm install -g wrangler
 
-      - name: Download Worker Script and Deploy with KV Binding
+      - name: Bind KV using wrangler secret approach
         run: |
           echo "========================================="
-          echo "步骤1：下载当前 Worker 脚本"
+          echo "使用 Cloudflare API 修改 Worker 绑定"
           echo "========================================="
+
+          # 步骤1：获取当前 Worker 的元数据
+          echo "获取当前 Worker 信息..."
           
-          # 用 API 下载当前 Worker 脚本
-          curl -s -X GET \
-            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}/environments/production/content" \
+          WORKER_INFO=$(curl -s \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}" \
             -H "X-Auth-Email: ${{ secrets.CF_EMAIL }}" \
             -H "X-Auth-Key: ${{ secrets.CF_API_KEY }}" \
-            -o _worker.js
+            -H "Content-Type: application/json")
           
-          SCRIPT_SIZE=$(wc -c < _worker.js)
-          echo "下载完成，脚本大小：${SCRIPT_SIZE} 字节"
+          # 提取脚本上传需要的 script_tag
+          SCRIPT_TAG=$(echo "$WORKER_INFO" | jq -r '.result.default_environment.script_tag')
+          echo "Script tag: $SCRIPT_TAG"
+          
+          # 获取现有绑定
+          EXISTING_BINDINGS=$(echo "$WORKER_INFO" | jq -r '.result.bindings // []')
+          echo "现有绑定: $EXISTING_BINDINGS"
+          
+          # 准备新的绑定列表（合并现有绑定和我们的 KV 绑定）
+          UPDATED_BINDINGS=$(echo "$EXISTING_BINDINGS" | jq --arg kv_id "${{ secrets.KV_NAMESPACE_ID }}" --arg kv_name "${{ secrets.KV_BINDING_NAME }}" '
+            map(select(.type != "kv_namespace"))
+            | . + [{
+                "type": "kv_namespace",
+                "name": $kv_name,
+                "namespace_id": $kv_id
+              }]
+          ')
           
           echo ""
+          echo "更新后的绑定："
+          echo "$UPDATED_BINDINGS" | jq '.'
+
+          # 步骤2：用 wrangler 的方式部署（强制 --no-bundle 避免构建错误）
+          echo ""
           echo "========================================="
-          echo "步骤2：创建 wrangler.toml 配置文件"
+          echo "通过 wrangler 更新配置"
           echo "========================================="
           
+          # 创建一个最小的占位脚本（wrangler 需要一个文件）
+          echo 'export default { fetch() { return new Response("OK") } }' > placeholder.js
+          
+          # 创建配置
           cat > wrangler.toml << EOF
           name = "${{ secrets.WORKER_NAME }}"
-          main = "_worker.js"
+          main = "placeholder.js"
           compatibility_date = "2025-11-04"
           
           [[kv_namespaces]]
@@ -45,52 +71,112 @@ jobs:
           id = "${{ secrets.KV_NAMESPACE_ID }}"
           EOF
           
-          echo "wrangler.toml 内容："
-          cat wrangler.toml
-          
-          echo ""
-          echo "========================================="
-          echo "步骤3：部署 Worker（含 KV 绑定）"
-          echo "========================================="
-          
+          # 使用 --no-bundle 和 --dry-run 测试配置
           CLOUDFLARE_API_KEY="${{ secrets.CF_API_KEY }}" \
           CLOUDFLARE_EMAIL="${{ secrets.CF_EMAIL }}" \
           npx wrangler deploy \
             --config wrangler.toml \
-            --name "${{ secrets.WORKER_NAME }}"
+            --name "${{ secrets.WORKER_NAME }}" \
+            --no-bundle \
+            --dry-run
+
+          echo ""
+          echo "✅ Wrangler 配置验证通过（使用 --dry-run 不会真正部署）"
+
+      - name: Update Bindings via API
+        run: |
+          echo ""
+          echo "========================================="
+          echo "通过 API 更新绑定元数据"
+          echo "========================================="
           
-          if [ $? -eq 0 ]; then
+          # 获取当前 Worker 的完整元数据
+          WORKER_DATA=$(curl -s \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}" \
+            -H "X-Auth-Email: ${{ secrets.CF_EMAIL }}" \
+            -H "X-Auth-Key: ${{ secrets.CF_API_KEY }}" \
+            -H "Content-Type: application/json")
+          
+          # 构建包含新绑定的元数据
+          EXISTING_BINDINGS=$(echo "$WORKER_DATA" | jq -r '.result.bindings // []')
+          
+          UPDATED_BINDINGS=$(echo "$EXISTING_BINDINGS" | jq --arg kv_id "${{ secrets.KV_NAMESPACE_ID }}" --arg kv_name "${{ secrets.KV_BINDING_NAME }}" '
+            map(select(.type != "kv_namespace"))
+            | . + [{
+                "type": "kv_namespace",
+                "name": $kv_name,
+                "namespace_id": $kv_id
+              }]
+          ')
+          
+          # 用 PUT 请求更新 Worker 的 bindings
+          # 注意：这个 API 端点可能因 Worker 类型而不同
+          UPDATE_PAYLOAD=$(jq -n --argjson bindings "$UPDATED_BINDINGS" '{
+            bindings: $bindings
+          }')
+          
+          echo "更新请求体："
+          echo "$UPDATE_PAYLOAD" | jq '.'
+          
+          UPDATE_RESPONSE=$(curl -s -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}" \
+            -H "X-Auth-Email: ${{ secrets.CF_EMAIL }}" \
+            -H "X-Auth-Key: ${{ secrets.CF_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "$UPDATE_PAYLOAD")
+          
+          echo "API 响应："
+          echo "$UPDATE_RESPONSE" | jq '.'
+          
+          UPDATE_SUCCESS=$(echo "$UPDATE_RESPONSE" | jq -r '.success')
+          if [ "$UPDATE_SUCCESS" = "true" ]; then
             echo ""
-            echo "✅✅✅ 部署成功！KV 绑定已生效！"
+            echo "✅✅✅ 绑定更新成功！"
           else
             echo ""
-            echo "❌❌❌ 部署失败"
-            exit 1
+            echo "⚠️  PUT 方法失败，尝试 PATCH 方法..."
+            
+            PATCH_RESPONSE=$(curl -s -X PATCH \
+              "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}" \
+              -H "X-Auth-Email: ${{ secrets.CF_EMAIL }}" \
+              -H "X-Auth-Key: ${{ secrets.CF_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d "$UPDATE_PAYLOAD")
+            
+            echo "PATCH 响应："
+            echo "$PATCH_RESPONSE" | jq '.'
+            
+            PATCH_SUCCESS=$(echo "$PATCH_RESPONSE" | jq -r '.success')
+            if [ "$PATCH_SUCCESS" != "true" ]; then
+              echo "❌ 绑定失败"
+              exit 1
+            else
+              echo "✅ PATCH 方法成功！"
+            fi
           fi
 
       - name: Verify KV Binding
         run: |
           echo ""
           echo "========================================="
-          echo "步骤4：验证 KV 绑定"
+          echo "最终验证"
           echo "========================================="
           
-          VERIFY_RESPONSE=$(curl -s -X GET \
+          FINAL_CHECK=$(curl -s \
             "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}" \
             -H "X-Auth-Email: ${{ secrets.CF_EMAIL }}" \
             -H "X-Auth-Key: ${{ secrets.CF_API_KEY }}" \
             -H "Content-Type: application/json")
           
           echo "当前所有绑定："
-          echo "$VERIFY_RESPONSE" | jq '.result.bindings'
+          echo "$FINAL_CHECK" | jq '.result.bindings'
           
-          FOUND=$(echo "$VERIFY_RESPONSE" | jq -r --arg ns_id "${{ secrets.KV_NAMESPACE_ID }}" '.result.bindings[]? | select(.namespace_id == $ns_id) | .name')
+          FOUND=$(echo "$FINAL_CHECK" | jq -r --arg ns_id "${{ secrets.KV_NAMESPACE_ID }}" '.result.bindings[]? | select(.namespace_id == $ns_id) | .name')
           
           if [ -n "$FOUND" ]; then
             echo ""
-            echo "✅✅✅ 验证成功！KV 绑定变量名：$FOUND"
+            echo "✅✅✅ 成功！KV 绑定：$FOUND"
           else
-            echo ""
-            echo "❌❌❌ 未找到 KV 绑定"
+            echo "❌ 未找到绑定"
             exit 1
           fi
