@@ -1,12 +1,9 @@
 name: Auto Bind KV after Deploy
 
 on:
-  # 方式1：每次推送到 main 分支时触发
   push:
     branches:
       - main
-  
-  # 方式2：可以手动触发（去 Actions 页面点按钮）
   workflow_dispatch:
 
 jobs:
@@ -14,49 +11,64 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      # 1. 检出代码（其实这一步是为了保证仓库可用，API 绑定不需要代码）
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 2. 调用 Cloudflare API 绑定 KV
       - name: Bind KV to Worker
         run: |
-          # 先获取当前 Worker 的完整信息
-          echo "正在获取 Worker 当前配置..."
+          echo "========================================="
+          echo "步骤1：直接更新 Worker 绑定配置"
+          echo "========================================="
+          
+          echo "正在获取现有 Worker 环境配置..."
           
           GET_RESPONSE=$(curl -s -X GET \
-            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}?include_subdomain_availability=true" \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}/environments/production" \
             -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
             -H "Content-Type: application/json")
           
-          echo "获取结果：$GET_RESPONSE"
+          echo "获取到的环境配置："
+          echo "$GET_RESPONSE" | jq '.'
           
-          # 检查是否获取成功
-          SUCCESS=$(echo "$GET_RESPONSE" | jq -r '.success')
-          if [ "$SUCCESS" != "true" ]; then
-            echo "❌ 获取 Worker 信息失败"
-            echo "$GET_RESPONSE" | jq '.errors'
-            exit 1
-          fi
-
-          # 提取已有的绑定，过滤掉旧的 KV 绑定
-          echo "正在处理绑定信息..."
+          EXISTING_BINDINGS=$(echo "$GET_RESPONSE" | jq -r '.result.bindings // []')
           
-          # 构建新的绑定配置
-          NEW_BINDINGS=$(echo "$GET_RESPONSE" | jq --arg kv_id "${{ secrets.KV_NAMESPACE_ID }}" '
-            .result.environments[0].bindings 
-            | map(select(.type != "kv_namespace")) 
-            | . + [{
+          echo ""
+          echo "现有绑定：$EXISTING_BINDINGS"
+          
+          if [ "$EXISTING_BINDINGS" = "null" ] || [ "$EXISTING_BINDINGS" = "[]" ]; then
+            echo "当前没有绑定，将创建新绑定"
+            NEW_BINDINGS=$(jq -n --arg kv_id "${{ secrets.KV_NAMESPACE_ID }}" --arg kv_name "${{ secrets.KV_BINDING_NAME }}" '
+              [{
                 "type": "kv_namespace",
-                "name": "MY_KV",
+                "name": $kv_name,
                 "namespace_id": $kv_id
               }]
-          ')
+            ')
+          else
+            echo "已有绑定，将合并 KV 绑定"
+            NEW_BINDINGS=$(echo "$EXISTING_BINDINGS" | jq --arg kv_id "${{ secrets.KV_NAMESPACE_ID }}" --arg kv_name "${{ secrets.KV_BINDING_NAME }}" '
+              map(select(.type != "kv_namespace")) 
+              | . + [{
+                  "type": "kv_namespace",
+                  "name": $kv_name,
+                  "namespace_id": $kv_id
+                }]
+            ')
+          fi
           
-          # 更新 Worker 绑定
-          echo "正在更新 Worker 绑定..."
+          echo ""
+          echo "新的绑定配置："
+          echo "$NEW_BINDINGS" | jq '.'
+          
+          echo ""
+          echo "========================================="
+          echo "步骤2：更新 Worker 绑定"
+          echo "========================================="
           
           PUT_BODY=$(jq -n --argjson bindings "$NEW_BINDINGS" '{bindings: $bindings}')
+          
+          echo "请求体："
+          echo "$PUT_BODY" | jq '.'
           
           PUT_RESPONSE=$(curl -s -X PUT \
             "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}/environments/production" \
@@ -64,37 +76,42 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$PUT_BODY")
           
-          echo "更新结果：$PUT_RESPONSE"
+          echo "更新结果："
+          echo "$PUT_RESPONSE" | jq '.'
           
-          # 检查更新结果
           PUT_SUCCESS=$(echo "$PUT_RESPONSE" | jq -r '.success')
           if [ "$PUT_SUCCESS" = "true" ]; then
-            echo "✅ KV 绑定成功！"
+            echo ""
+            echo "✅✅✅ KV 绑定成功！"
           else
-            echo "❌ KV 绑定失败"
-            echo "$PUT_RESPONSE" | jq '.errors'
+            echo ""
+            echo "❌❌❌ KV 绑定失败"
+            echo "$PUT_RESPONSE" | jq -r '.errors'
             exit 1
           fi
 
-      # 3. 验证绑定结果
       - name: Verify KV Binding
         run: |
-          echo "正在验证 KV 绑定..."
+          echo ""
+          echo "========================================="
+          echo "步骤3：验证 KV 绑定"
+          echo "========================================="
           
           VERIFY_RESPONSE=$(curl -s -X GET \
-            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}" \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}/environments/production" \
             -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
             -H "Content-Type: application/json")
           
-          # 检查绑定列表
-          echo "当前绑定："
-          echo "$VERIFY_RESPONSE" | jq '.result.bindings[] | select(.type == "kv_namespace") | {name, namespace_id}'
+          echo "当前环境绑定："
+          echo "$VERIFY_RESPONSE" | jq '.result.bindings'
           
-          HAS_KV=$(echo "$VERIFY_RESPONSE" | jq '.result.bindings[] | select(.namespace_id == "${{ secrets.KV_NAMESPACE_ID }}")' )
+          HAS_KV=$(echo "$VERIFY_RESPONSE" | jq -r '.result.bindings[]? | select(.namespace_id == "${{ secrets.KV_NAMESPACE_ID }}") | .namespace_id')
           
           if [ -n "$HAS_KV" ]; then
-            echo "✅ 验证成功：KV 已正确绑定"
+            echo ""
+            echo "✅✅✅ 验证成功：KV 命名空间 ${{ secrets.KV_NAMESPACE_ID }} 已正确绑定！"
           else
-            echo "❌ 验证失败：未找到指定的 KV 绑定"
+            echo ""
+            echo "❌❌❌ 验证失败：未找到指定的 KV 绑定"
             exit 1
           fi
