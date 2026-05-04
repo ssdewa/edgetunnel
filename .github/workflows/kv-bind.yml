@@ -11,17 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
       - name: Bind KV to Worker
         run: |
           echo "========================================="
           echo "正在为 Worker 绑定 KV 命名空间"
           echo "========================================="
           
-          # 构建我们要设置的全部 KV 绑定（这里只有你指定的那一个）
-          # 注意：这个 API 会用你提供的列表**完全替换**掉当前 Worker 的所有 KV 绑定
           NEW_KV_BINDINGS=$(jq -n --arg kv_id "${{ secrets.KV_NAMESPACE_ID }}" --arg kv_name "${{ secrets.KV_BINDING_NAME }}" '
             [{
               "type": "kv_namespace",
@@ -30,29 +25,27 @@ jobs:
             }]
           ')
           
-          echo "准备设置的 KV 绑定："
+          echo "绑定配置："
           echo "$NEW_KV_BINDINGS" | jq '.'
-
-          echo ""
-          echo "正在调用绑定更新 API..."
           
-          # 调用专门用于更新 KV 绑定的 API
           BINDING_RESPONSE=$(curl -s -X PUT \
             "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/scripts/${{ secrets.WORKER_NAME }}/bindings/kv_namespaces" \
-            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "X-Auth-Email: ${{ secrets.CF_EMAIL }}" \
+            -H "X-Auth-Key: ${{ secrets.CF_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d "$NEW_KV_BINDINGS")
           
+          echo ""
           echo "API 响应："
           echo "$BINDING_RESPONSE" | jq '.'
-
-          BIND_SUCCESS=$(echo "$BINDING_RESPONSE" | jq -r '.success')
-          if [ "$BIND_SUCCESS" = "true" ]; then
+          
+          SUCCESS=$(echo "$BINDING_RESPONSE" | jq -r '.success')
+          if [ "$SUCCESS" = "true" ]; then
             echo ""
-            echo "✅✅✅ KV 绑定操作已提交！"
+            echo "✅✅✅ KV 绑定成功！"
           else
             echo ""
-            echo "❌❌❌ 绑定失败，请检查错误信息"
+            echo "❌❌❌ 绑定失败"
             echo "$BINDING_RESPONSE" | jq -r '.errors'
             exit 1
           fi
@@ -61,26 +54,25 @@ jobs:
         run: |
           echo ""
           echo "========================================="
-          echo "验证 KV 绑定结果"
+          echo "验证绑定结果"
           echo "========================================="
           
-          # 查询 Worker 信息来验证绑定
           VERIFY_RESPONSE=$(curl -s -X GET \
             "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/services/${{ secrets.WORKER_NAME }}" \
-            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "X-Auth-Email: ${{ secrets.CF_EMAIL }}" \
+            -H "X-Auth-Key: ${{ secrets.CF_API_KEY }}" \
             -H "Content-Type: application/json")
           
-          echo "当前 Worker 的所有绑定："
+          echo "当前所有绑定："
           echo "$VERIFY_RESPONSE" | jq '.result.bindings'
           
-          # 检查是否包含我们设置的 KV 命名空间
-          FOUND_KV=$(echo "$VERIFY_RESPONSE" | jq -r --arg ns_id "${{ secrets.KV_NAMESPACE_ID }}" '.result.bindings[]? | select(.type == "kv_namespace" and .namespace_id == $ns_id) | .name')
+          FOUND=$(echo "$VERIFY_RESPONSE" | jq -r --arg ns_id "${{ secrets.KV_NAMESPACE_ID }}" '.result.bindings[]? | select(.namespace_id == $ns_id) | .name')
           
-          if [ -n "$FOUND_KV" ]; then
+          if [ -n "$FOUND" ]; then
             echo ""
-            echo "✅✅✅ 验证成功！KV “${{ secrets.KV_BINDING_NAME }}”（ID: ${{ secrets.KV_NAMESPACE_ID }}）已正确绑定。"
+            echo "✅✅✅ 验证成功！变量名：$FOUND"
           else
             echo ""
-            echo "❌❌❌ 验证失败：未能找到指定的 KV 绑定。"
+            echo "❌❌❌ 未找到绑定"
             exit 1
           fi
