@@ -11,42 +11,45 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: Install wrangler
+        run: npm install -g wrangler
+
       - name: Bind KV to Worker
         run: |
           echo "========================================="
-          echo "正在为 Worker 绑定 KV 命名空间"
+          echo "使用 wrangler 绑定 KV 命名空间"
           echo "========================================="
           
-          NEW_KV_BINDINGS=$(jq -n --arg kv_id "${{ secrets.KV_NAMESPACE_ID }}" --arg kv_name "${{ secrets.KV_BINDING_NAME }}" '
-            [{
-              "type": "kv_namespace",
-              "name": $kv_name,
-              "namespace_id": $kv_id
-            }]
-          ')
+          # 创建 wrangler.toml 配置文件（临时）
+          cat > wrangler.toml << EOF
+          name = "${{ secrets.WORKER_NAME }}"
+          main = "_worker.js"
+          compatibility_date = "2025-11-04"
           
-          echo "绑定配置："
-          echo "$NEW_KV_BINDINGS" | jq '.'
+          [[kv_namespaces]]
+          binding = "${{ secrets.KV_BINDING_NAME }}"
+          id = "${{ secrets.KV_NAMESPACE_ID }}"
+          EOF
           
-          BINDING_RESPONSE=$(curl -s -X PUT \
-            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/scripts/${{ secrets.WORKER_NAME }}/bindings/kv_namespaces" \
-            -H "X-Auth-Email: ${{ secrets.CF_EMAIL }}" \
-            -H "X-Auth-Key: ${{ secrets.CF_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d "$NEW_KV_BINDINGS")
+          echo "生成的 wrangler.toml 内容："
+          cat wrangler.toml
           
           echo ""
-          echo "API 响应："
-          echo "$BINDING_RESPONSE" | jq '.'
+          echo "正在部署（含 KV 绑定）..."
           
-          SUCCESS=$(echo "$BINDING_RESPONSE" | jq -r '.success')
-          if [ "$SUCCESS" = "true" ]; then
+          # 用 API Key 方式认证并部署
+          CLOUDFLARE_API_KEY="${{ secrets.CF_API_KEY }}" \
+          CLOUDFLARE_EMAIL="${{ secrets.CF_EMAIL }}" \
+          npx wrangler deploy \
+            --config wrangler.toml \
+            --name "${{ secrets.WORKER_NAME }}"
+          
+          if [ $? -eq 0 ]; then
             echo ""
-            echo "✅✅✅ KV 绑定成功！"
+            echo "✅✅✅ 部署成功，KV 绑定已生效！"
           else
             echo ""
-            echo "❌❌❌ 绑定失败"
-            echo "$BINDING_RESPONSE" | jq -r '.errors'
+            echo "❌❌❌ 部署失败"
             exit 1
           fi
 
@@ -70,9 +73,9 @@ jobs:
           
           if [ -n "$FOUND" ]; then
             echo ""
-            echo "✅✅✅ 验证成功！变量名：$FOUND"
+            echo "✅✅✅ 验证成功！KV 绑定变量名：$FOUND"
           else
             echo ""
-            echo "❌❌❌ 未找到绑定"
+            echo "❌❌❌ 未找到 KV 绑定"
             exit 1
           fi
